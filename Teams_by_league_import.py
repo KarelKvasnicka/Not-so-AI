@@ -2,6 +2,8 @@ import requests
 import json
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
+from typing import Dict, Optional
+import logging
 
 API_KEY = '8d6adb05582ab584f36f361197f5a59f1aa2b0d899b10ce3a3717f8bf896e1ea'
 
@@ -26,14 +28,17 @@ SEASON_IDS = {
 
 # Cache pro API volání
 @lru_cache(maxsize=32)
-def make_api_request(url):
+def make_api_request(url: str) -> Optional[Dict]:
     """
     Cachovaná funkce pro API požadavky
     """
-    response = requests.get(url)
-    if response.status_code == 200:
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
         return response.json()
-    return None
+    except requests.RequestException as e:
+        logging.error(f"API request failed: {str(e)}")
+        return None
 
 def get_league_teams_positions():
     """
