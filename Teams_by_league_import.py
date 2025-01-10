@@ -2,10 +2,12 @@ import requests
 import json
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
-from typing import Dict, Optional
-import logging
+import os
 
+# Definice konstant na začátku souboru
 API_KEY = '8d6adb05582ab584f36f361197f5a59f1aa2b0d899b10ce3a3717f8bf896e1ea'
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
+os.makedirs(DATA_DIR, exist_ok=True)
 
 # Slovník pro mapování soutěží - přesunut na úroveň modulu pro lepší přístup
 COMPETITION_NAMES = {
@@ -28,17 +30,14 @@ SEASON_IDS = {
 
 # Cache pro API volání
 @lru_cache(maxsize=32)
-def make_api_request(url: str) -> Optional[Dict]:
+def make_api_request(url):
     """
     Cachovaná funkce pro API požadavky
     """
-    try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
+    response = requests.get(url)
+    if response.status_code == 200:
         return response.json()
-    except requests.RequestException as e:
-        logging.error(f"API request failed: {str(e)}")
-        return None
+    return None
 
 def get_league_teams_positions():
     """
@@ -64,48 +63,90 @@ def get_league_teams_positions():
     return positions
 
 def get_matches_for_next_days():
+    print("Začínám stahování dat...")
     today = datetime.now(timezone.utc).date()
     all_matches = []
-    team_positions = get_league_teams_positions()
     
-    # Získání zápasů pro příštích 7 dní v jednom API volání
-    end_date = today + timedelta(days=7)
-    url = f"https://api.football-data-api.com/matches-between?key={API_KEY}&from={today}&to={end_date}"
+    # Nejdřív získáme data o týmech pro všechny ligy
+    team_positions = {}
+    for season_id in SEASON_IDS.values():
+        url = f"https://api.football-data-api.com/league-teams?key={API_KEY}&season_id={season_id}&include=stats"
+        data = make_api_request(url)
+        if data and 'data' in data:
+            for team in data['data']:
+                team_positions[team['id']] = team.get('table_position')
     
-    data = make_api_request(url)
-    if data:
+    # Stáhneme data pro následujících 7 dní
+    for i in range(8):
+        current_date = today + timedelta(days=i)
+        date_str = current_date.strftime('%Y-%m-%d')
+        
+        url = f"https://api.football-data-api.com/todays-matches?key={API_KEY}&date={date_str}&timezone=Europe/Prague"
+        print(f"Stahuji data pro datum {date_str}")
+        
+        data = make_api_request(url)
+        if not data:
+            print(f"Nepodařilo se získat data pro datum {date_str}")
+            continue
+            
         matches = data.get('data', [])
+        if matches:
+            all_matches.extend(matches)
+    
+    if not all_matches:
+        print("Nebyla nalezena žádná data pro následující týden")
+        return
         
-        filtered_matches = [
-            {
-                "id": match.get("id"),
-                "homeID": match.get("homeID"),
-                "awayID": match.get("awayID"),
-                "home_name": match.get("home_name"),
-                "away_name": match.get("away_name"),
-                "competition": COMPETITION_NAMES.get(match.get('competition_id'), "Unknown"),
-                "date": datetime.fromtimestamp(match.get("date_unix"), timezone.utc).strftime('%Y-%m-%d') if match.get("date_unix") else None,
-                "home_position": team_positions.get(COMPETITION_NAMES.get(match.get('competition_id')), {}).get(match.get("homeID")),
-                "away_position": team_positions.get(COMPETITION_NAMES.get(match.get('competition_id')), {}).get(match.get("awayID"))
-            }
-            for match in matches
-            if match.get('competition_id') in COMPETITION_NAMES
-        ]
-        
-        with open('matches.json', 'w', encoding='utf-8') as json_file:
+    print(f"Celkem nalezeno {len(all_matches)} zápasů")
+    
+    # Filtrujeme pouze zápasy z požadovaných soutěží
+    filtered_matches = [
+        {
+            "id": match.get("id"),
+            "homeID": match.get("homeID"),
+            "awayID": match.get("awayID"),
+            "home_name": match.get("home_name"),
+            "away_name": match.get("away_name"),
+            "competition": COMPETITION_NAMES.get(match.get('competition_id'), "Unknown"),
+            "date": match.get("date") or match.get("kickoff"),  # Přidáno záložní pole pro datum
+            "home_position": team_positions.get(match.get("homeID")),
+            "away_position": team_positions.get(match.get("awayID"))
+        }
+        for match in all_matches
+        if match.get('competition_id') in COMPETITION_NAMES
+    ]
+    
+    if not filtered_matches:
+        print("Žádné zápasy neodpovídají kritériím")
+        return
+    
+    print(f"Filtrovány {len(filtered_matches)} zápasy")
+    
+    # Uložení do matches.json
+    matches_file = os.path.join(DATA_DIR, 'matches.json')
+    try:
+        with open(matches_file, 'w', encoding='utf-8') as json_file:
             json.dump(filtered_matches, json_file, indent=4, ensure_ascii=False)
+        print(f"Data úspěšně uložena do: {matches_file}")
+    except Exception as e:
+        print(f"Chyba při ukládání souboru: {str(e)}")
 
 @lru_cache(maxsize=128)
 def find_match_by_teams(team1_id, team2_id):
     """
     Cachovaná funkce pro vyhledávání zápasů
     """
-    with open('matches.json', 'r', encoding='utf-8') as file:
-        matches = json.load(file)
-    
-    return next((match for match in matches 
-                if (match['homeID'] == team1_id and match['awayID'] == team2_id) or
-                   (match['homeID'] == team2_id and match['awayID'] == team1_id)), None)
+    matches_file = os.path.join(DATA_DIR, 'matches.json')
+    try:
+        with open(matches_file, 'r', encoding='utf-8') as file:
+            matches = json.load(file)
+        
+        return next((match for match in matches 
+                    if (match['homeID'] == team1_id and match['awayID'] == team2_id) or
+                       (match['homeID'] == team2_id and match['awayID'] == team1_id)), None)
+    except FileNotFoundError:
+        print(f"Soubor {matches_file} nebyl nalezen.")
+        return None
 
 @lru_cache(maxsize=128)
 def get_team_stats(team_id):
@@ -217,11 +258,13 @@ def calculate_match_probabilities(team1_id, team2_id):
     }
 
 def main():
+    # Nejdřív získáme a uložíme zápasy, bez ohledu na další průběh programu
+    print(f"\nData budou uložena do složky: {DATA_DIR}")
+    print("Načítám data o zápasech...")
+    get_matches_for_next_days()
+    
     try:
-        # Get matches for next days
-        get_matches_for_next_days()
-        
-        team1_id = int(input("Zadejte ID prvního týmu: "))
+        team1_id = int(input("\nZadejte ID prvního týmu: "))
         team2_id = int(input("Zadejte ID druhého týmu: "))
         
         match = find_match_by_teams(team1_id, team2_id)
