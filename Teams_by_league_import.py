@@ -164,39 +164,37 @@ def get_team_stats(team_id):
 
 def calculate_win_probability(home_stats, away_stats, match):
     """
-    Vypočítá pravděpodobnost výhry domácího týmu s přidanou vahou pro pozici v tabulce
+    Vypočítá pravděpodobnost výhry domácího týmu s vylepšenými parametry
     """
-    # Základní parametry (původní váhy)
-    home_goals_weight = 0.15
-    away_goals_weight = 0.15
-    home_clean_sheets_weight = 0.1
-    away_clean_sheets_weight = 0.1
-    home_form_weight = 0.1
-    away_form_weight = 0.1
-    
-    # Nová váha pro pozici v tabulce (největší váha)
-    table_position_weight = 0.3
+    # Rozšířené váhy pro různé faktory
+    weights = {
+        'goals': 0.2,           # Vstřelené/obdržené góly
+        'clean_sheets': 0.15,   # Čistá konta
+        'form': 0.15,          # Aktuální forma
+        'table_position': 0.2,  # Pozice v tabulce
+        'h2h': 0.2,            # Vzájemné zápasy
+        'home_advantage': 0.1   # Výhoda domácího prostředí
+    }
     
     # Výpočet skóre z gólů
-    home_goals_score = home_stats.get('goals_scored_per_match', 0) * home_goals_weight
-    away_goals_score = away_stats.get('goals_scored_per_match', 0) * away_goals_weight
+    home_goals_score = home_stats.get('goals_scored_per_match', 0) * weights['goals']
+    away_goals_score = away_stats.get('goals_scored_per_match', 0) * weights['goals']
     
     # Výpočet skóre z čistých kont
-    home_clean_sheets_score = home_stats.get('clean_sheets_ratio', 0) * home_clean_sheets_weight
-    away_clean_sheets_score = away_stats.get('clean_sheets_ratio', 0) * away_clean_sheets_weight
+    home_clean_sheets_score = home_stats.get('clean_sheets_ratio', 0) * weights['clean_sheets']
+    away_clean_sheets_score = away_stats.get('clean_sheets_ratio', 0) * weights['clean_sheets']
     
     # Výpočet skóre z formy
-    home_form_score = home_stats.get('form_ratio', 0) * home_form_weight
-    away_form_score = away_stats.get('form_ratio', 0) * away_form_weight
+    home_form_score = home_stats.get('form_ratio', 0) * weights['form']
+    away_form_score = away_stats.get('form_ratio', 0) * weights['form']
     
     # Výpočet skóre z pozice v tabulce
-    home_position = match.get('home_position', 20)  # defaultně poslední místo
-    away_position = match.get('away_position', 20)  # defaultně poslední místo
-    max_position = 20  # předpokládáme ligu s 20 týmy
+    home_position = match.get('home_position', 20)
+    away_position = match.get('away_position', 20)
+    max_position = 20
     
-    # Převedení pozice na skóre (čím nižší pozice, tím vyšší skóre)
-    home_position_score = ((max_position - home_position) / max_position) * table_position_weight
-    away_position_score = ((max_position - away_position) / max_position) * table_position_weight
+    home_position_score = ((max_position - home_position) / max_position) * weights['table_position']
+    away_position_score = ((max_position - away_position) / max_position) * weights['table_position']
     
     # Celkové skóre pro oba týmy
     home_total_score = (
@@ -213,22 +211,19 @@ def calculate_win_probability(home_stats, away_stats, match):
         away_position_score
     )
     
-    # Přidání výhody domácího prostředí (10%)
-    home_advantage = 0.1
-    home_total_score *= (1 + home_advantage)
+    # Přidání výhody domácího prostředí
+    home_total_score *= (1 + weights['home_advantage'])
     
     # Výpočet pravděpodobnosti
     total_score = home_total_score + away_total_score
     if total_score == 0:
-        return 0.5  # Pokud nemáme data, vracíme 50%
+        return 0.5
     
-    home_win_probability = home_total_score / total_score
-    
-    return home_win_probability
+    return home_total_score / total_score
 
 def calculate_match_probabilities(team1_id, team2_id):
     """
-    Optimalizovaný výpočet pravděpodobností
+    Vylepšený výpočet pravděpodobností bez umělých limitů
     """
     match = find_match_by_teams(team1_id, team2_id)
     if not match:
@@ -241,20 +236,33 @@ def calculate_match_probabilities(team1_id, team2_id):
         return None
     
     home_win_prob = calculate_win_probability(team1_stats, team2_stats, match)
-    draw_prob = 0.24
+    
+    # Dynamický výpočet remízy založený na vyrovnanosti týmů
+    strength_difference = abs(home_win_prob - 0.5)
+    draw_prob = 0.45 * (1 - strength_difference)
+    
+    # Výpočet pravděpodobnosti výhry hostů jako zbytek do 1
     away_win_prob = 1 - home_win_prob - draw_prob
     
+    # Ošetření případu, kdy by away_win_prob bylo záporné
     if away_win_prob < 0:
-        away_win_prob = 0.05
+        excess = abs(away_win_prob)
+        # Rozdělíme přebytek mezi home_win_prob a draw_prob proporcionálně
         total = home_win_prob + draw_prob
-        ratio = 0.95 / total
-        home_win_prob *= ratio
-        draw_prob *= ratio
+        home_win_prob = home_win_prob * (1 - excess/total)
+        draw_prob = draw_prob * (1 - excess/total)
+        away_win_prob = 0
     
     return {
-        'team1': {'name': match['home_name'], 'win_probability': round(home_win_prob * 100)},
-        'team2': {'name': match['away_name'], 'win_probability': round(away_win_prob * 100)},
-        'draw_probability': round(draw_prob * 100)
+        'team1': {
+            'name': match['home_name'], 
+            'win_probability': round(home_win_prob * 100, 2)
+        },
+        'team2': {
+            'name': match['away_name'], 
+            'win_probability': round(away_win_prob * 100, 2)
+        },
+        'draw_probability': round(draw_prob * 100, 2)
     }
 
 def main():
